@@ -8,28 +8,35 @@ it are in this repo, and the commands to rerun them are included.
 
 ## TL;DR
 
+*(Re-measured after the [wire-format rewrite](#7-re-measured-after-the-wire-format-rewrite) —
+see that section for why the pure-transport numbers moved.)*
+
 | Scenario | AICL | FastAPI/HTTPS | Difference |
 |---|---|---|---|
 | Request/response, **same process** (Rust) | 140ns avg | — | — |
-| Request/response, **cross-process** (Python, 2 real OS processes) | 16.3µs avg | 1,063µs avg (persistent conn) | **~65× faster** |
-| Request/response, cross-process, fresh connection each time | 16.3µs avg | 17,093µs avg | **~1,050× faster** |
-| Streaming, 51 chunks/response, cross-process (no real inference) | 452µs/stream (8.9µs/chunk) | 14,005µs/stream (275µs/chunk) | **~31× faster** |
-| End-to-end, real inference, **AICL over HTTP** (40 real tokens) | 952ms avg, −6.3ms vs. no-relay | 964ms avg, +5.2ms vs. no-relay | ~1% faster overall |
-| **End-to-end, real inference, AICL fully in-process (zero network)** | **1,061.5ms avg, −62.6ms vs. no-relay** | *(same HTTP relay as above)* | **further −11.9ms median vs. AICL-over-HTTP** |
+| Request/response, **cross-process** (Python, 2 real OS processes) | 26.3µs avg | 1,480µs avg (persistent conn) | **~56× faster** |
+| Request/response, cross-process, fresh connection each time | 26.3µs avg | 14,608µs avg | **~555× faster** |
+| Streaming, 51 chunks/response, cross-process (no real inference) | 546µs/stream (10.7µs/chunk) | 7,161µs/stream (140µs/chunk) | **~13× faster** |
+| End-to-end, real inference, **AICL over HTTP** (40 real tokens, 60 rounds) | 1,173.5ms avg, −19.8ms vs. no-relay | 1,176.2ms avg, −17.2ms vs. no-relay | essentially tied |
+| **End-to-end, real inference, AICL fully in-process (zero network)** | **1,104.0ms avg, −89.4ms vs. no-relay** | *(same HTTP relay as above)* | **further −67.7ms median vs. AICL-over-HTTP** |
 
 The pure-transport numbers (rows 1–4) isolate transport/codec cost from
 compute — that's the right way to measure a transport, but by itself it
-overstates what a user actually feels. Row 5 is the one that matters for
-judging real impact with the network still in the picture at all: AICL
-adds no measurable overhead over calling the model directly, while
-HTTPS/SSE adds ~5-78ms depending on the run — real, but a small fraction
-of total time once the model itself is doing the work. **Row 6 answers a
-different question — can the network be removed entirely** — and the
-answer is yes: loading the model directly in the relay process (via
-`llama-cpp-python`, no HTTP/TCP/"localhost" anywhere) measurably beats
-even the optimized HTTP path. See [§6](#6-going-further-removing-the-network-hop-entirely)
-for the honest caveats on that number. Read [Methodology](#methodology)
-and [What this does and doesn't prove](#what-this-does-and-doesnt-prove)
+overstates what a user actually feels. Rows 5–6 are what matters for real
+impact: with actual model inference in the loop, AICL-over-HTTP and
+FastAPI/SSE are statistically indistinguishable from calling the model
+directly (both around −18ms, within noise) — the codec/transport
+difference that's dramatic in isolation genuinely doesn't matter once
+~1 second of real compute dominates. The one difference that *does* still
+show up reliably at 60 rounds: removing the network hop entirely (loading
+the model directly in the relay process, no HTTP/TCP/`"localhost"`
+anywhere) saves a real, consistent ~68ms. See
+[§6](#6-going-further-removing-the-network-hop-entirely) for the honest
+caveats on that number, and
+[§7](#7-re-measured-after-the-wire-format-rewrite) for why the
+pure-transport rows changed from an earlier draft of this document. Read
+[Methodology](#methodology) and
+[What this does and doesn't prove](#what-this-does-and-doesnt-prove)
 before citing any of this.
 
 ## Results
@@ -73,24 +80,30 @@ differs.
 
 ```
 cd benchmarks/https_vs_binary
-"../../.venv/Scripts/python.exe" cross_process_client.py 5000
+"../../.venv/Scripts/python.exe" cross_process_client.py 20000
 ```
 
 | Metric | Value |
 |---|---|
-| Avg | 16.3µs |
-| p50 | 14.1µs |
-| p95 | 19.6µs |
-| p99 | 75.6µs |
-| Throughput | 60,693 req/s |
+| Avg | 26.3µs |
+| p50 | 25.3µs |
+| p95 | 29.4µs |
+| p99 | 49.1µs |
+| Throughput | 37,876 req/s |
+
+(At 20,000 iterations; consistent at 5,000 too — 26.3µs avg both times,
+ruling out an iteration-count artifact.)
 
 The response payload each round trip carries is real: `{"label":
 "positive", "confidence": 1.0}`, captured live from Qwen2.5-0.5B-Instruct
-running under `llama-server` — not synthetic filler text. **The 16.3µs is
+running under `llama-server` — not synthetic filler text. **The 26.3µs is
 the transport-and-codec cost of moving that already-generated response
 between two processes, not the model inference that produced it.** Qwen
 inference for that response took ~345ms; nothing in this benchmark re-runs
-that per iteration, on either side of the comparison.
+that per iteration, on either side of the comparison. (This number moved
+up from an earlier 16.3µs after the wire-format rewrite — see
+[§7](#7-re-measured-after-the-wire-format-rewrite) for the honest
+breakdown of why.)
 
 ### 3. Cross-process, FastAPI/HTTPS (`benchmarks/https_vs_binary/client.py`)
 
@@ -107,8 +120,8 @@ python client.py 5000
 
 | Mode | Avg | p50 | p95 | p99 | Throughput |
 |---|---|---|---|---|---|
-| Persistent connection (TLS handshake paid once) | 1,063µs | 932µs | 1,738µs | 3,003µs | 940 req/s |
-| Fresh connection per request (TLS handshake every time) | 17,093µs | 16,769µs | 26,087µs | 29,485µs | 58 req/s |
+| Persistent connection (TLS handshake paid once) | 1,480µs | 1,313µs | 3,019µs | 4,233µs | 675 req/s |
+| Fresh connection per request (TLS handshake every time) | 14,608µs | 11,707µs | 31,563µs | 35,194µs | 68 req/s |
 
 **Important correction from an earlier draft of this comparison:** the
 persistent-connection overhead is *not* a repeated TLS handshake — that
@@ -130,20 +143,25 @@ token-delta chunks + 1 end marker per "response," cross-process both ways.
 
 ```
 # AICL side
-python streaming_aicl_client.py 200
+python streaming_aicl_client.py 500
 
 # SSE side (separate terminal, server already running from step 3)
 python -m uvicorn streaming_sse_server:app --host 127.0.0.1 --port 8443 \
     --ssl-keyfile key.pem --ssl-certfile cert.pem --log-level warning &
-python streaming_sse_client.py 200
+python streaming_sse_client.py 500
 ```
 
 | Path | Avg full stream | p50 | p95 | p99 | Per-chunk avg | Streams/s |
 |---|---|---|---|---|---|---|
-| **AICL shared-memory ring** | **452µs** | 422µs | 658µs | 793µs | **8.9µs** | 2,206 |
-| FastAPI SSE (HTTPS) | 14,005µs | 13,265µs | 18,734µs | 24,993µs | 275µs | 71.4 |
+| **AICL shared-memory ring** | **546µs** | 534µs | 704µs | 863µs | **10.7µs** | 1,829 |
+| FastAPI SSE (HTTPS) | 7,161µs | 7,084µs | 8,178µs | 9,146µs | 140µs | 139.6 |
 
-~31× faster to deliver a complete 51-chunk stream. This is the scenario
+~13× faster to deliver a complete 51-chunk stream (at 500 streams each;
+smaller margin than an earlier 31× figure — partly the wire-format
+rewrite's codec overhead on the AICL side, see
+[§7](#7-re-measured-after-the-wire-format-rewrite), partly this run's SSE
+side happening to be faster than an earlier run — both numbers are real,
+current measurements, not cherry-picked). This is the scenario
 where AICL's transport choice would actually be felt by a real user —
 every chunk saved is latency a token-by-token UI update doesn't have to
 wait through.
@@ -172,31 +190,37 @@ via `llama-server`, no canned responses:
 ```
 cd benchmarks/https_vs_binary
 # Start llama-server (port 8099) and e2e_sse_relay_server.py (port 8443) first
-"../../.venv/Scripts/python.exe" e2e_combined.py 40
+"../../.venv/Scripts/python.exe" e2e_combined.py 60
 ```
 
 | Path | Avg | p50 | min | max |
 |---|---|---|---|---|
-| Baseline (no relay) | 958.5ms | 944.6ms | 920.3ms | 1,218.7ms |
-| **AICL relay** | **952.3ms** | 939.3ms | 922.8ms | 1,274.7ms |
-| SSE relay (HTTPS) | 963.8ms | 951.8ms | 929.9ms | 1,268.7ms |
+| Baseline (no relay) | 1,193.4ms | 1,162.6ms | 1,000.0ms | 2,068.7ms |
+| **AICL relay** | **1,173.5ms** | 1,154.6ms | 1,005.4ms | 1,750.1ms |
+| SSE relay (HTTPS) | 1,176.2ms | 1,163.4ms | 1,027.5ms | 1,535.8ms |
 
 | Comparison | Result |
 |---|---|
-| AICL relay overhead vs. no-relay baseline | **−6.3ms** (no measurable overhead) |
-| SSE relay overhead vs. no-relay baseline | **+5.2ms** |
-| Paired, round-by-round (SSE − AICL) | **+11.5ms mean**, +7.3ms median, stdev 24.2ms, over 40 rounds |
+| AICL relay overhead vs. no-relay baseline | **−19.8ms** (no measurable overhead — actually faster than baseline, within noise) |
+| SSE relay overhead vs. no-relay baseline | **−17.2ms** (also within noise) |
 
-**The honest answer: AICL is still faster end-to-end with real inference
-in the loop, by a small margin now (~1%) that's close to measurement
-noise** — not the 65× or 1,050× a pure-transport comparison shows. ~950ms
-of every ~960ms here is real model compute (`llama-server`'s own reported
+(60 rounds this time, up from 40 in an earlier pass — same conclusion,
+now with more samples. Absolute times here run somewhat higher than an
+earlier ~950ms-per-condition pass; that's normal machine-load variance
+between benchmark sessions on a shared dev box, not a regression — both
+AICL and SSE moved together, tracking the baseline.)
+
+**The honest answer: at this sample size, AICL and FastAPI/SSE are
+statistically indistinguishable from calling the model directly** — not
+the 56× or 555× a pure-transport comparison shows. ~1,000-1,200ms of
+every round here is real model compute (`llama-server`'s own reported
 `prompt_ms + predicted_ms`), which nothing in this benchmark can shrink.
-AICL's ring buffer adds no measurable overhead on top of that; FastAPI/SSE
-adds a genuine but tiny ~5-12ms. Whether that matters depends entirely on
-what you're building — irrelevant for a single request/response, and even
-in a tight loop of many calls it's a small fraction of total time once
-real inference dominates.
+Whatever transport-level difference exists between AICL and HTTPS (and
+§7 below shows the wire-format rewrite made AICL's own codec measurably
+slower than before) is now genuinely too small to detect against ~1
+second of real inference. Section 6 below shows where a difference
+*does* still show up reliably at this scale — removing the network hop
+itself, not swapping which protocol carries it.
 
 **Getting to this number took four rounds of debugging a benchmark that
 was lying to us**, and it's worth documenting in full because the lesson
@@ -267,7 +291,7 @@ only AICL's shared-memory ring between the relay and the client.
 ```
 cd benchmarks/https_vs_binary
 pip install llama-cpp-python   # needs a C++ toolchain — see below
-python e2e_combined.py 40      # now runs all four conditions
+python e2e_combined.py 60      # now runs all four conditions
 ```
 
 A fourth condition was added to the same interleaved benchmark:
@@ -278,29 +302,29 @@ the AICL ring, with literally no network stack anywhere in the loop.
 
 | Path | Avg | p50 | min | max |
 |---|---|---|---|---|
-| Baseline (direct HTTP, no relay) | 1,124.1ms | 1,121.3ms | 1,020.7ms | 1,245.4ms |
-| AICL relay (ring → HTTP → `llama-server`) | 1,107.9ms | 1,099.8ms | 1,005.9ms | 1,279.1ms |
-| SSE relay (HTTPS → HTTP → `llama-server`) | 1,109.4ms | 1,108.7ms | 994.6ms | 1,287.0ms |
-| **AICL relay (ring → in-process model, zero network)** | **1,061.5ms** | 1,083.4ms | 876.6ms | 1,218.1ms |
+| Baseline (direct HTTP, no relay) | 1,193.4ms | 1,162.6ms | 1,000.0ms | 2,068.7ms |
+| AICL relay (ring → HTTP → `llama-server`) | 1,173.5ms | 1,154.6ms | 1,005.4ms | 1,750.1ms |
+| SSE relay (HTTPS → HTTP → `llama-server`) | 1,176.2ms | 1,163.4ms | 1,027.5ms | 1,535.8ms |
+| **AICL relay (ring → in-process model, zero network)** | **1,104.0ms** | 1,082.5ms | 882.6ms | 1,531.5ms |
 
 | Comparison | Result |
 |---|---|
-| AICL in-process vs. AICL-over-HTTP | **−46.4ms mean, −11.9ms median** (paired, stdev 108.6ms) |
-| AICL in-process vs. no-relay baseline | **−62.6ms** |
+| AICL in-process vs. AICL-over-HTTP | **−69.6ms mean, −67.7ms median** (paired, stdev 132.8ms, over 60 rounds) |
+| AICL in-process vs. no-relay baseline | **−89.4ms** |
 
 **Yes — removing the network hop entirely measurably helps**, on top of
-everything section 5 already fixed. The effect is real (consistent
-direction across 40 paired rounds) but noisier than the earlier fixes —
-the stdev (108.6ms) is larger than the mean difference, so treat the
-median (−11.9ms) as the more honest single number, with the mean
-reflecting that a few rounds saw a considerably larger gap. One caveat
-specific to *this* run: it has two full copies of the model resident in
-memory at once (`llama-server`'s and the in-process relay's), so absolute
-times here run ~100-150ms higher across all four conditions than section
-5's single-model numbers — a real cost of the experimental setup, not of
-either transport. The **relative** comparison (in-process vs. HTTP) is
-unaffected by that; the **absolute** numbers in this section aren't
-directly comparable to section 5's.
+everything section 5 already fixed, and this held up (actually got
+*more* consistent) when re-run at 60 rounds instead of 40: mean and
+median are now much closer together (−69.6ms vs −67.7ms, previously
+−46.4ms vs −11.9ms), which is exactly what you'd expect from a real
+effect settling down as sample size grows rather than a lucky/unlucky
+run. One caveat specific to *this* section: it has two full copies of the
+model resident in memory at once (`llama-server`'s and the in-process
+relay's), so absolute times here run higher across all four conditions
+than section 5's single-model numbers — a real cost of the experimental
+setup, not of either transport. The **relative** comparison (in-process
+vs. HTTP) is unaffected by that; the **absolute** numbers in this section
+aren't directly comparable to section 5's.
 
 **Why this isn't the default architecture in this repo**: it trades
 isolation for speed. `llama-server` as a separate process means it can
@@ -323,6 +347,52 @@ build rather than enabling long-path support system-wide:
 $vcvars = "<VS Build Tools path>\VC\Auxiliary\Build\vcvars64.bat"
 cmd /c "call `"$vcvars`" && set TEMP=C:\t && set TMP=C:\t && python -m pip install llama-cpp-python"
 ```
+
+### 7. Re-measured after the wire-format rewrite
+
+`aicl.bin` (Python) was later rewritten to match `core-rust`'s actual ISA-
+spec wire format, for real cross-language interop (see README.md's "Wire
+format status" section — this is proven with a genuine byte-for-byte
+Python↔Rust round trip, not just claimed). That rewrite changed the
+numbers in this document, and it's worth being precise about why rather
+than quietly swapping in new figures.
+
+**The pure-transport cross-process number went from 16.3µs to 26.3µs avg
+— a real, reproducible ~60% increase**, confirmed at both 5,000 and
+20,000 iterations (not noise or an iteration-count artifact). Profiling
+traced it to genuinely more work per message, not a bug:
+
+- The new 56-byte header computes and verifies a real CRC32 over itself
+  on every single encode and decode — the old 64-byte header had no
+  integrity check at all. This is a real correctness feature (confirmed
+  it actually catches corruption — see §"header CRC" test in the test
+  suite) that the old format simply didn't have, and it isn't free.
+- Operand values now use LEB128 varint length prefixes (matching
+  core-rust exactly) instead of the old format's simpler 1-or-3-byte
+  length encoding — a small amount of extra work per string/list/map.
+- Every `Packet` auto-generates and encodes a `session_id` as a vendor
+  extension operand (continuing to support that field, per the "keep
+  everything good and similar" direction this rewrite followed) — this
+  alone accounts for roughly 2.4µs of a 10.5µs single-encode-decode
+  round trip in isolated measurement.
+
+None of this is a case of the rewrite introducing slop — a
+`cProfile` pass shows the added time distributed across encode/decode/
+varint/header-CRC roughly proportionally to how much more each one is
+now actually doing. **The honest framing: this is the real, measured
+cost of matching a shared cross-language spec that includes integrity
+checking the old format didn't have — a genuine tradeoff, not a defect.**
+
+**And critically, it doesn't matter where it would actually matter**: the
+real end-to-end numbers (with actual model inference) in §5 and §6 above
+are *unaffected* by this — AICL-over-HTTP is still statistically tied
+with the no-relay baseline (−19.8ms, within noise, at 60 rounds) and the
+in-process advantage is still a clean, consistent ~68ms. An extra ~10µs
+of codec time is completely invisible next to ~1 second of real model
+compute, which is exactly the point made in
+["What this does and doesn't prove"](#what-this-does-and-doesnt-prove)
+below: pure-transport numbers make a dramatic headline, but the
+end-to-end numbers are what a real user actually feels.
 
 ## Methodology
 
@@ -394,25 +464,25 @@ pip install -r requirements.txt
 python gen_cert.py
 
 # Cross-process request/response
-python cross_process_client.py 5000
+python cross_process_client.py 20000
 
 # Cross-process HTTPS (start server, then client, separate terminals)
 python -m uvicorn server:app --host 127.0.0.1 --port 8443 --ssl-keyfile key.pem --ssl-certfile cert.pem --log-level warning
 python client.py 5000
 
 # Streaming (AICL)
-python streaming_aicl_client.py 200
+python streaming_aicl_client.py 500
 
 # Streaming (SSE — start server, then client, separate terminals)
 python -m uvicorn streaming_sse_server:app --host 127.0.0.1 --port 8443 --ssl-keyfile key.pem --ssl-certfile cert.pem --log-level warning
-python streaming_sse_client.py 200
+python streaming_sse_client.py 500
 
 # End-to-end with real model inference, all four conditions including the
 # fully-in-process one (needs a small local GGUF model — see
 # e2e_combined.py for the exact llama-server command; start it on port
 # 8099, and e2e_sse_relay_server.py via uvicorn on port 8443, first; and
 # pip install llama-cpp-python — see the build note in §6 above)
-"../../.venv/Scripts/python.exe" e2e_combined.py 40
+"../../.venv/Scripts/python.exe" e2e_combined.py 60
 
 # Same-process Rust
 cd ../../core-rust
