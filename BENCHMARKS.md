@@ -8,16 +8,22 @@ it are in this repo, and the commands to rerun them are included.
 
 ## TL;DR
 
-| Scenario | AICL | FastAPI/HTTPS | Speedup |
+| Scenario | AICL | FastAPI/HTTPS | Difference |
 |---|---|---|---|
 | Request/response, **same process** (Rust) | 140ns avg | — | — |
-| Request/response, **cross-process** (Python, 2 real OS processes) | 16.3µs avg | 1,063µs avg (persistent conn) | **~65×** |
-| Request/response, cross-process, fresh connection each time | 16.3µs avg | 17,093µs avg | **~1,050×** |
-| Streaming, 51 chunks/response, cross-process | 452µs/stream (8.9µs/chunk) | 14,005µs/stream (275µs/chunk) | **~31×** |
+| Request/response, **cross-process** (Python, 2 real OS processes) | 16.3µs avg | 1,063µs avg (persistent conn) | **~65× faster** |
+| Request/response, cross-process, fresh connection each time | 16.3µs avg | 17,093µs avg | **~1,050× faster** |
+| Streaming, 51 chunks/response, cross-process (no real inference) | 452µs/stream (8.9µs/chunk) | 14,005µs/stream (275µs/chunk) | **~31× faster** |
+| **End-to-end with real model inference** (40 real tokens, Qwen2.5-0.5B) | 1,647ms avg, **−6.5ms vs. no-relay** | 1,732ms avg, **+78ms vs. no-relay** | **~5% faster overall** |
 
-The cross-process numbers are the honest comparison — same language
-(Python), same kind of process boundary, only the transport differs. Read
-[Methodology](#methodology) and [What this does and doesn't prove](#what-this-does-and-doesnt-prove)
+The pure-transport numbers (rows 1–4) isolate transport/codec cost from
+compute — that's the right way to measure a transport, but by itself it
+overstates what a user actually feels. The **last row is the one that
+matters for judging real impact**: with genuine model inference in the
+loop, AICL adds no measurable overhead over calling the model directly,
+while HTTPS/SSE adds ~78ms — real, but a small fraction of total time once
+the model itself is doing ~950ms of work. Read [Methodology](#methodology)
+and [What this does and doesn't prove](#what-this-does-and-doesnt-prove)
 before citing any of this.
 
 ## Results
@@ -136,6 +142,87 @@ where AICL's transport choice would actually be felt by a real user —
 every chunk saved is latency a token-by-token UI update doesn't have to
 wait through.
 
+### 5. End-to-end with real model inference — does the transport gap survive contact with real work?
+
+Every result above deliberately excludes model inference, to isolate
+transport cost. That's the right way to measure a transport, but it leaves
+the actual question unanswered: **when a real model is doing real work,
+does AICL's transport advantage still matter, or does it disappear into
+the noise of generation time?**
+
+This benchmark answers that directly. Three conditions, interleaved
+round-by-round (not run as separate blocks — see the warm-up note below),
+each doing a **real** 40-token generation against Qwen2.5-0.5B-Instruct
+via `llama-server`, no canned responses:
+
+- **Baseline**: client calls `llama-server` directly, no relay.
+- **AICL relay**: client → AICL shared-memory ring → relay process → calls
+  `llama-server` for real → streams each real token back over the ring as
+  it's produced → client.
+- **SSE relay**: client → HTTPS → relay process (FastAPI) → calls
+  `llama-server` for real → streams each real token back as SSE as it's
+  produced → client.
+
+```
+cd benchmarks/https_vs_binary
+# Start llama-server (port 8099) and e2e_sse_relay_server.py (port 8443) first
+"../../.venv/Scripts/python.exe" e2e_combined.py 40
+```
+
+| Path | Avg | p50 | min | max |
+|---|---|---|---|---|
+| Baseline (no relay) | 1,653.5ms | 1,644.1ms | 1,480.7ms | 1,885.3ms |
+| **AICL relay** | **1,647.0ms** | 1,639.2ms | 1,477.6ms | 2,125.8ms |
+| SSE relay (HTTPS) | 1,731.7ms | 1,727.2ms | 1,594.6ms | 2,006.2ms |
+
+| Comparison | Result |
+|---|---|
+| AICL relay overhead vs. no-relay baseline | **−6.5ms** (no measurable overhead) |
+| SSE relay overhead vs. no-relay baseline | **+78.2ms** |
+| Paired, round-by-round (SSE − AICL) | **+84.7ms mean**, +89.6ms median, over 40 rounds |
+
+**The honest answer: yes, AICL is still faster end-to-end with real
+inference in the loop — but by about 5% of total time, not the 65× or
+1,050× a pure-transport comparison shows.** ~950ms of every ~1,650ms here
+is real model compute (`llama-server`'s own reported `prompt_ms +
+predicted_ms`), which nothing in this benchmark can shrink. AICL's ring
+buffer adds no measurable overhead on top of that; FastAPI/SSE adds
+roughly 80ms. Whether 80ms matters depends entirely on what you're
+building — negligible for a single request/response, potentially
+noticeable in a tight loop of many such calls.
+
+**Getting to this number took three rounds of debugging a benchmark that
+was lying to us**, and it's worth documenting because the lesson
+generalizes:
+
+1. **Warm-up drift**: running each condition as one big sequential block
+   let `llama-server` (and the OS page cache, CPU frequency scaling) get
+   faster over the first several calls, so whichever condition ran last
+   looked artificially fastest. Fixed by interleaving: one round of
+   baseline → AICL → SSE, repeated, instead of three separate blocks.
+2. **A real connection-reuse bug**: `llama-server` doesn't reliably
+   support HTTP keep-alive — a reused connection gets forcibly closed by
+   the server on the second request (`WinError 10054`), and httpx's
+   stale-connection retry silently added ~2 seconds that had nothing to
+   do with any transport being tested. Fixed by using a fresh client per
+   call to `llama-server`, everywhere.
+3. **Sync vs. async httpx**: even after fixing both of the above, one
+   path was still ~1.7s faster than the others. Isolated with a direct
+   side-by-side test (identical request, identical server, only the
+   client's sync-vs-async calling convention changed) — sync httpx
+   streaming measured ~3,450ms, async measured ~1,700ms, for the exact
+   same request. The SSE relay path happened to use async for its call to
+   `llama-server`; baseline and the AICL relay happened to use sync. That
+   was the *entire* earlier "HTTPS is faster" result — a Windows/httpx
+   networking artifact, not a transport-protocol finding. Fixed by making
+   every path's call to `llama-server` use the same (async) convention,
+   which is the only way the comparison measures what it claims to.
+
+None of these three bugs were in AICL's code — all three were in the
+benchmark harness itself, and all three happened to point the same
+direction (making a non-AICL path look artificially fast). Reporting the
+first number that came out would have been actively misleading.
+
 ## Methodology
 
 - **Timer**: Rust benchmarks use `std::time::Instant` (Windows:
@@ -218,6 +305,11 @@ python streaming_aicl_client.py 200
 # Streaming (SSE — start server, then client, separate terminals)
 python -m uvicorn streaming_sse_server:app --host 127.0.0.1 --port 8443 --ssl-keyfile key.pem --ssl-certfile cert.pem --log-level warning
 python streaming_sse_client.py 200
+
+# End-to-end with real model inference (needs a small local GGUF model —
+# see e2e_combined.py for the exact llama-server command; start it on port
+# 8099, and e2e_sse_relay_server.py via uvicorn on port 8443, first)
+"../../.venv/Scripts/python.exe" e2e_combined.py 40
 
 # Same-process Rust
 cd ../../core-rust

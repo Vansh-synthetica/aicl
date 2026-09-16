@@ -78,15 +78,22 @@ Two real OS processes, genuine shared-memory IPC, the same `aicl.bin`
 codec this repo ships, compared against FastAPI over HTTPS doing the same
 job:
 
-| Scenario | AICL | FastAPI/HTTPS | Speedup |
+| Scenario | AICL | FastAPI/HTTPS | Difference |
 |---|---|---|---|
-| Request/response (cross-process) | 16.3µs avg | 1,063µs avg | **~65×** |
-| Streaming, 51 chunks/response (cross-process) | 452µs/stream | 14,005µs/stream | **~31×** |
+| Request/response (cross-process, no inference) | 16.3µs avg | 1,063µs avg | ~65× faster |
+| Streaming, 51 chunks/response (cross-process, no inference) | 452µs/stream | 14,005µs/stream | ~31× faster |
+| **End-to-end with real model inference** (40 real tokens) | 1,647ms avg | 1,732ms avg | **~5% faster overall** |
 
-Full methodology, every caveat, and exact reproduction commands are in
-[BENCHMARKS.md](BENCHMARKS.md) — including what this does *not* prove
-(it's not a claim that HTTPS is bad, just that it's solving a different
-problem than same-machine shared memory).
+The pure-transport rows isolate transport cost from model compute — real,
+but they overstate what a user actually feels. The last row is the one
+that matters: with a real model generating real tokens, AICL adds no
+measurable overhead over calling the model directly, while HTTPS/SSE adds
+~78ms — genuine, but a small slice of the ~1.6s a real generation takes.
+
+Full methodology, every caveat, the debugging story behind that last
+number (three separate benchmark bugs had to be found and fixed before it
+was trustworthy), and exact reproduction commands are in
+[BENCHMARKS.md](BENCHMARKS.md).
 
 ## Wire format status — read before assuming cross-language compatibility
 
