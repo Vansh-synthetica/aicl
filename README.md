@@ -82,18 +82,21 @@ job:
 |---|---|---|---|
 | Request/response (cross-process, no inference) | 16.3µs avg | 1,063µs avg | ~65× faster |
 | Streaming, 51 chunks/response (cross-process, no inference) | 452µs/stream | 14,005µs/stream | ~31× faster |
-| **End-to-end with real model inference** (40 real tokens) | 1,647ms avg | 1,732ms avg | **~5% faster overall** |
+| **End-to-end with real model inference** (40 real tokens) | 952ms avg | 964ms avg | **~1% faster overall** |
 
 The pure-transport rows isolate transport cost from model compute — real,
 but they overstate what a user actually feels. The last row is the one
 that matters: with a real model generating real tokens, AICL adds no
 measurable overhead over calling the model directly, while HTTPS/SSE adds
-~78ms — genuine, but a small slice of the ~1.6s a real generation takes.
+a genuine but tiny ~5-12ms — a small slice of the ~950ms a real generation
+takes once you strip out avoidable networking overhead (see below).
 
-Full methodology, every caveat, the debugging story behind that last
-number (three separate benchmark bugs had to be found and fixed before it
-was trustworthy), and exact reproduction commands are in
-[BENCHMARKS.md](BENCHMARKS.md).
+Full methodology, every caveat, and the debugging story behind that last
+number are in [BENCHMARKS.md](BENCHMARKS.md) — including two real,
+fixable inefficiencies found along the way (DNS-resolving `"localhost"`
+instead of using `127.0.0.1`, and reconstructing a fresh HTTP client per
+call instead of reusing one) that turned out to cost every path in this
+benchmark ~40% of its total time, unrelated to AICL vs. HTTPS at all.
 
 ## Wire format status — read before assuming cross-language compatibility
 

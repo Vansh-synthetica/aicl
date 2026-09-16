@@ -32,43 +32,47 @@ from aicl.bin.types import Symbol
 from aicl.transport.shared_memory_ring import SharedMemoryRing
 
 STOP_SENTINEL = b"__STOP__"
-LLAMA_URL = "http://localhost:8099/v1/chat/completions"
+# 127.0.0.1, not "localhost": resolving "localhost" measured ~250-290ms of
+# DNS/name-resolution overhead per call on this machine — the literal IP
+# skips that entirely (confirmed via direct A/B test, ~5ms vs ~260ms for
+# an identical request).
+LLAMA_URL = "http://127.0.0.1:8099/v1/chat/completions"
 SSE_BASE_URL = "https://127.0.0.1:8443"
 PROMPT = "List three interesting facts about the Roman Empire."
 MAX_TOKENS = 40
 
 
-async def _baseline_call_async() -> float:
-    # A fresh client per call, not a reused persistent one: llama-server
-    # doesn't reliably support HTTP keep-alive (confirmed via direct
-    # testing — a reused connection gets forcibly closed by the server on
-    # the second request, and httpx's stale-connection retry adds ~2s of
-    # silent overhead that has nothing to do with the actual transport
-    # being measured).
+async def baseline_call(client: httpx.AsyncClient) -> float:
+    # httpx.AsyncClient, not the sync Client: a direct side-by-side test
+    # (sync vs async, identical request, same server) measured sync
+    # streaming reads at ~3450ms and async at ~1700ms for this exact
+    # request on this machine — a real, large, completely
+    # transport-independent httpx/Windows-networking artifact. Every path
+    # in this benchmark that talks to llama-server uses async for this
+    # reason, or the comparison silently measures "sync vs async httpx"
+    # instead of "AICL vs HTTPS".
     #
-    # httpx.AsyncClient, not the sync Client, for the same reason: a
-    # direct side-by-side test (sync vs async, identical request, same
-    # server) measured sync streaming reads at ~3450ms and async at
-    # ~1700ms for this exact request on this machine — a real, large,
-    # completely transport-independent httpx/Windows-networking artifact.
-    # Every path in this benchmark that talks to llama-server must use the
-    # same (async) calling convention, or the comparison silently measures
-    # "sync vs async httpx" instead of "AICL vs HTTPS" — which is exactly
-    # what an earlier draft of this benchmark got wrong.
+    # One persistent client, reused across calls, with an explicit
+    # `Connection: close` header per request — not a fresh AsyncClient()
+    # constructed every call. llama-server doesn't reliably support HTTP
+    # keep-alive (confirmed: a reused connection with no close-signal gets
+    # forcibly closed by the server on the second request, WinError
+    # 10054), but constructing a whole fresh AsyncClient to work around
+    # that costs ~160-220ms of its own, every single call (confirmed via
+    # direct measurement — that cost is flat regardless of trust_env or
+    # host, i.e. it's the client object's own setup, not networking).
+    # Sending `Connection: close` tells httpx to close and replace the
+    # connection itself after each response — same safety against the
+    # stale-connection bug, without paying full client reconstruction.
     t0 = time.perf_counter()
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        async with client.stream("POST", LLAMA_URL, json={
-            "model": "qwen2.5-0.5b",
-            "messages": [{"role": "user", "content": PROMPT}],
-            "max_tokens": MAX_TOKENS, "temperature": 0.1, "stream": True,
-        }) as resp:
-            async for _line in resp.aiter_lines():
-                pass
+    async with client.stream("POST", LLAMA_URL, headers={"Connection": "close"}, json={
+        "model": "qwen2.5-0.5b",
+        "messages": [{"role": "user", "content": PROMPT}],
+        "max_tokens": MAX_TOKENS, "temperature": 0.1, "stream": True,
+    }) as resp:
+        async for _line in resp.aiter_lines():
+            pass
     return (time.perf_counter() - t0) * 1000
-
-
-def baseline_call() -> float:
-    return asyncio.run(_baseline_call_async())
 
 
 def aicl_call(req_ring: SharedMemoryRing, resp_ring: SharedMemoryRing) -> float:
@@ -81,22 +85,13 @@ def aicl_call(req_ring: SharedMemoryRing, resp_ring: SharedMemoryRing) -> float:
     return (time.perf_counter() - t0) * 1000
 
 
-def sse_call(client: httpx.Client) -> float:
-    t0 = time.perf_counter()
-    with client.stream("POST", "/generate", json={"prompt": PROMPT}) as resp:
-        for line in resp.iter_lines():
-            if line.startswith("data:") and '"kind": "end"' in line:
-                break
-    return (time.perf_counter() - t0) * 1000
-
-
 def summarize(name: str, times_ms: list[float]) -> None:
     print(f"  {name:<28} avg: {statistics.mean(times_ms):>8.1f}ms   "
           f"p50: {statistics.median(times_ms):>8.1f}ms   "
           f"min: {min(times_ms):>8.1f}ms   max: {max(times_ms):>8.1f}ms")
 
 
-def main() -> None:
+async def main() -> None:
     rounds = int(sys.argv[1]) if len(sys.argv) > 1 else 20
 
     req_name = f"aicl_e2e_req_{uuid.uuid4().hex[:8]}"
@@ -112,21 +107,22 @@ def main() -> None:
     sse_times: list[float] = []
 
     try:
-        with httpx.Client(base_url=SSE_BASE_URL, verify=False, http2=False, timeout=60.0) as sse_client:
+        async with httpx.AsyncClient(timeout=60.0) as baseline_client, \
+                httpx.AsyncClient(base_url=SSE_BASE_URL, verify=False, http2=False, timeout=60.0) as sse_client:
 
             # Warm-up: one untimed call per condition, in the same
             # interleaved order, so the FIRST measured round isn't the
             # coldest one for whichever condition happens to run first.
-            baseline_call()
+            await baseline_call(baseline_client)
             aicl_call(req_ring, resp_ring)
-            sse_call(sse_client)
+            await sse_call_async(sse_client)
 
             print(f"Interleaved end-to-end benchmark ({rounds} rounds x 3 conditions, "
                   f"real {MAX_TOKENS}-token generation each)")
             for i in range(rounds):
-                baseline_times.append(baseline_call())
+                baseline_times.append(await baseline_call(baseline_client))
                 aicl_times.append(aicl_call(req_ring, resp_ring))
-                sse_times.append(sse_call(sse_client))
+                sse_times.append(await sse_call_async(sse_client))
 
         print()
         summarize("Baseline (no relay)", baseline_times)
@@ -160,5 +156,14 @@ def main() -> None:
         resp_ring.close()
 
 
+async def sse_call_async(client: httpx.AsyncClient) -> float:
+    t0 = time.perf_counter()
+    async with client.stream("POST", "/generate", json={"prompt": PROMPT}) as resp:
+        async for line in resp.aiter_lines():
+            if line.startswith("data:") and '"kind": "end"' in line:
+                break
+    return (time.perf_counter() - t0) * 1000
+
+
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

@@ -19,7 +19,7 @@ from aicl.bin.types import Symbol
 from aicl.transport.shared_memory_ring import SharedMemoryRing
 
 STOP_SENTINEL = b"__STOP__"
-LLAMA_URL = "http://localhost:8099/v1/chat/completions"
+LLAMA_URL = "http://127.0.0.1:8099/v1/chat/completions"
 MAX_TOKENS = 40
 
 
@@ -28,35 +28,32 @@ async def main() -> None:
     req_ring = SharedMemoryRing.attach(req_name)
     resp_ring = SharedMemoryRing.attach(resp_name)
 
-    while True:
-        # Long timeout: this blocks between requests for however long the
-        # client takes between calls, which in a benchmark loop should be
-        # near-instant but during process startup (cold Python interpreter
-        # + import time for this script itself) can eat into a short
-        # default budget before the first request even arrives.
-        wire = req_ring.pop(timeout_s=120.0)
-        if wire == STOP_SENTINEL:
-            break
-        view = decode(wire)
-        prompt = view.symbols[0].value
+    # One persistent AsyncClient for the whole process lifetime, not a
+    # fresh one per call — see e2e_combined.py's baseline_call for the
+    # full reasoning: a fresh AsyncClient() costs ~160-220ms to construct
+    # regardless of what it talks to (confirmed via direct measurement),
+    # and llama-server's keep-alive problem is better solved with an
+    # explicit `Connection: close` header per request than by rebuilding
+    # the whole client every time. Async (not sync) for the same reason
+    # documented there: sync httpx streaming reads measured ~2x slower
+    # than async for this exact request on this machine, a real
+    # transport-independent artifact every path here must avoid the same
+    # way.
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        while True:
+            # Long timeout: this blocks between requests for however long
+            # the client takes between calls, which in a benchmark loop
+            # should be near-instant but during process startup (cold
+            # Python interpreter + import time for this script itself) can
+            # eat into a short default budget before the first request
+            # even arrives.
+            wire = req_ring.pop(timeout_s=120.0)
+            if wire == STOP_SENTINEL:
+                break
+            view = decode(wire)
+            prompt = view.symbols[0].value
 
-        # A fresh AsyncClient per call to llama-server, not a reused
-        # persistent one, and async rather than sync:
-        #  - llama-server doesn't reliably support HTTP keep-alive
-        #    (confirmed: a reused connection gets forcibly closed by the
-        #    server on the second request; httpx's stale-connection retry
-        #    silently adds ~2s that has nothing to do with AICL's own
-        #    transport).
-        #  - sync httpx streaming reads measured ~2x slower than async for
-        #    this exact request against this exact server on this machine
-        #    (~3450ms vs ~1700ms) — a real, large, transport-independent
-        #    artifact. Every path in this benchmark that talks to
-        #    llama-server uses async for this reason (see
-        #    e2e_combined.py's baseline_call), or the comparison would
-        #    silently measure "sync vs async httpx" instead of "AICL vs
-        #    HTTPS".
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            async with client.stream("POST", LLAMA_URL, json={
+            async with client.stream("POST", LLAMA_URL, headers={"Connection": "close"}, json={
                 "model": "qwen2.5-0.5b",
                 "messages": [{"role": "user", "content": prompt}],
                 "max_tokens": MAX_TOKENS,
@@ -73,7 +70,7 @@ async def main() -> None:
                     # real token content, relayed as it's produced.
                     chunk = Packet(operation=4, symbols=[Symbol(S_STRING, payload)])
                     resp_ring.push(encode(chunk))
-        resp_ring.push(encode(Packet(operation=4, symbols=[], intent="end")))
+            resp_ring.push(encode(Packet(operation=4, symbols=[], intent="end")))
 
     req_ring.close()
     resp_ring.close()

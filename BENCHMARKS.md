@@ -14,7 +14,7 @@ it are in this repo, and the commands to rerun them are included.
 | Request/response, **cross-process** (Python, 2 real OS processes) | 16.3µs avg | 1,063µs avg (persistent conn) | **~65× faster** |
 | Request/response, cross-process, fresh connection each time | 16.3µs avg | 17,093µs avg | **~1,050× faster** |
 | Streaming, 51 chunks/response, cross-process (no real inference) | 452µs/stream (8.9µs/chunk) | 14,005µs/stream (275µs/chunk) | **~31× faster** |
-| **End-to-end with real model inference** (40 real tokens, Qwen2.5-0.5B) | 1,647ms avg, **−6.5ms vs. no-relay** | 1,732ms avg, **+78ms vs. no-relay** | **~5% faster overall** |
+| **End-to-end with real model inference** (40 real tokens, Qwen2.5-0.5B) | 952ms avg, **−6.3ms vs. no-relay** | 964ms avg, **+5.2ms vs. no-relay** | **~1% faster overall** |
 
 The pure-transport numbers (rows 1–4) isolate transport/codec cost from
 compute — that's the right way to measure a transport, but by itself it
@@ -171,29 +171,30 @@ cd benchmarks/https_vs_binary
 
 | Path | Avg | p50 | min | max |
 |---|---|---|---|---|
-| Baseline (no relay) | 1,653.5ms | 1,644.1ms | 1,480.7ms | 1,885.3ms |
-| **AICL relay** | **1,647.0ms** | 1,639.2ms | 1,477.6ms | 2,125.8ms |
-| SSE relay (HTTPS) | 1,731.7ms | 1,727.2ms | 1,594.6ms | 2,006.2ms |
+| Baseline (no relay) | 958.5ms | 944.6ms | 920.3ms | 1,218.7ms |
+| **AICL relay** | **952.3ms** | 939.3ms | 922.8ms | 1,274.7ms |
+| SSE relay (HTTPS) | 963.8ms | 951.8ms | 929.9ms | 1,268.7ms |
 
 | Comparison | Result |
 |---|---|
-| AICL relay overhead vs. no-relay baseline | **−6.5ms** (no measurable overhead) |
-| SSE relay overhead vs. no-relay baseline | **+78.2ms** |
-| Paired, round-by-round (SSE − AICL) | **+84.7ms mean**, +89.6ms median, over 40 rounds |
+| AICL relay overhead vs. no-relay baseline | **−6.3ms** (no measurable overhead) |
+| SSE relay overhead vs. no-relay baseline | **+5.2ms** |
+| Paired, round-by-round (SSE − AICL) | **+11.5ms mean**, +7.3ms median, stdev 24.2ms, over 40 rounds |
 
-**The honest answer: yes, AICL is still faster end-to-end with real
-inference in the loop — but by about 5% of total time, not the 65× or
-1,050× a pure-transport comparison shows.** ~950ms of every ~1,650ms here
-is real model compute (`llama-server`'s own reported `prompt_ms +
-predicted_ms`), which nothing in this benchmark can shrink. AICL's ring
-buffer adds no measurable overhead on top of that; FastAPI/SSE adds
-roughly 80ms. Whether 80ms matters depends entirely on what you're
-building — negligible for a single request/response, potentially
-noticeable in a tight loop of many such calls.
+**The honest answer: AICL is still faster end-to-end with real inference
+in the loop, by a small margin now (~1%) that's close to measurement
+noise** — not the 65× or 1,050× a pure-transport comparison shows. ~950ms
+of every ~960ms here is real model compute (`llama-server`'s own reported
+`prompt_ms + predicted_ms`), which nothing in this benchmark can shrink.
+AICL's ring buffer adds no measurable overhead on top of that; FastAPI/SSE
+adds a genuine but tiny ~5-12ms. Whether that matters depends entirely on
+what you're building — irrelevant for a single request/response, and even
+in a tight loop of many calls it's a small fraction of total time once
+real inference dominates.
 
-**Getting to this number took three rounds of debugging a benchmark that
-was lying to us**, and it's worth documenting because the lesson
-generalizes:
+**Getting to this number took four rounds of debugging a benchmark that
+was lying to us**, and it's worth documenting in full because the lesson
+generalizes well past this one comparison:
 
 1. **Warm-up drift**: running each condition as one big sequential block
    let `llama-server` (and the OS page cache, CPU frequency scaling) get
@@ -204,8 +205,8 @@ generalizes:
    support HTTP keep-alive — a reused connection gets forcibly closed by
    the server on the second request (`WinError 10054`), and httpx's
    stale-connection retry silently added ~2 seconds that had nothing to
-   do with any transport being tested. Fixed by using a fresh client per
-   call to `llama-server`, everywhere.
+   do with any transport being tested. Initially "fixed" by using a fresh
+   client per call — correct in spirit, expensive in practice (see #4).
 3. **Sync vs. async httpx**: even after fixing both of the above, one
    path was still ~1.7s faster than the others. Isolated with a direct
    side-by-side test (identical request, identical server, only the
@@ -215,13 +216,36 @@ generalizes:
    `llama-server`; baseline and the AICL relay happened to use sync. That
    was the *entire* earlier "HTTPS is faster" result — a Windows/httpx
    networking artifact, not a transport-protocol finding. Fixed by making
-   every path's call to `llama-server` use the same (async) convention,
-   which is the only way the comparison measures what it claims to.
+   every path's call to `llama-server` use the same (async) convention.
+4. **Two genuine, fixable sources of waste, found by profiling the "fast"
+   number for where the remaining time actually went** — this is the part
+   that made everything ~40% faster, not just more comparable:
+   - Resolving `"localhost"` cost **~250-290ms per request** on this
+     machine (confirmed via direct A/B test: identical request, `127.0.0.1`
+     took ~5ms, `localhost` took ~260ms). Switched every call to
+     `llama-server` to the literal IP.
+   - Constructing a fresh `httpx.AsyncClient()` per call (the fix from
+     step 2) cost a flat **~160-220ms every single time**, regardless of
+     host or `trust_env` setting — confirmed this was the client object's
+     own setup cost, not networking, by timing client construction with no
+     request at all. Fixed by keeping **one persistent `AsyncClient` per
+     process**, sending an explicit `Connection: close` header per request
+     instead — this still defeats `llama-server`'s keep-alive bug (the
+     server closes the connection itself, httpx opens a clean new one for
+     the next request) without paying full client-reconstruction cost.
 
-None of these three bugs were in AICL's code — all three were in the
-benchmark harness itself, and all three happened to point the same
-direction (making a non-AICL path look artificially fast). Reporting the
-first number that came out would have been actively misleading.
+   Combined, these two fixes cut **every condition's time by ~40-42%**
+   (baseline: 1,653ms → 958ms; AICL: 1,647ms → 952ms; SSE: 1,732ms →
+   964ms) — none of it an AICL-vs-HTTPS effect, all of it avoidable
+   Python/Windows networking overhead that was inflating every path
+   roughly equally and masking how close to the real inference floor
+   (`llama-server`'s own ~950ms) everything actually could get.
+
+None of these four issues were bugs in AICL's own code — all four were in
+the benchmark harness (or, for #4, in *how any Python client on Windows
+talks to a local HTTP server*, a lesson worth carrying into real code, not
+just this benchmark). Reporting the first number that came out at any of
+these stages would have been actively misleading.
 
 ## Methodology
 
