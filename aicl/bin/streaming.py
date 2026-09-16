@@ -42,7 +42,7 @@ class StreamingDecoder:
             except Exception:
                 scan += 1
                 continue
-            payload_length = struct.unpack_from(">I", self._buf, scan + 56)[0]
+            payload_length = struct.unpack_from(">I", self._buf, scan + 44)[0]
             pkt_end = scan + HEADER_SIZE + payload_length
             has_trailer = (self._buf[scan + 6] << 8 | self._buf[scan + 7]) & 0x0100
             if has_trailer:

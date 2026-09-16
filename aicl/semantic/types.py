@@ -83,31 +83,39 @@ class ModelIntent(Enum):
 
 
 # Intent -> AICL opcode mapping (defined in aicl.bin.ops)
+# Opcode values match core-rust's AiclOpcode exactly (see aicl/bin/ops.py)
+# — the ISA-spec-aligned rewrite of this codebase's wire format. Where
+# core-rust has no dedicated opcode for a given intent (it collapses many
+# "do a language-model thing" intents into the general-purpose Execute
+# opcode — see core-rust/src/packet.rs's rank/summarize/extract/
+# transform/plan/evaluate constructors, which all use AiclOpcode::Execute
+# too), this mapping does the same rather than inventing an opcode Rust
+# wouldn't recognize.
 INTENT_TO_OPCODE: Dict[ModelIntent, int] = {
-    ModelIntent.CLASSIFY: 0x03,       # OP_CLS
-    ModelIntent.GENERATE: 0x04,       # OP_GEN
-    ModelIntent.REASON: 0x05,         # OP_RSN
-    ModelIntent.EMBED: 0x06,          # OP_EMB
-    ModelIntent.RANK: 0x07,           # OP_RNK
-    ModelIntent.SUMMARIZE: 0x08,      # OP_SUM
-    ModelIntent.SYNTHESIZE: 0x09,     # OP_SYN
-    ModelIntent.VERIFY: 0x0A,         # OP_VRF
-    ModelIntent.EXTRACT: 0x0B,        # OP_XTR
-    ModelIntent.TRANSFORM: 0x0C,      # OP_TRN
-    ModelIntent.PLAN: 0x0D,           # OP_PLN
-    ModelIntent.EVALUATE: 0x0E,       # OP_EVL
-    ModelIntent.CALL_MODEL: 0x1A,     # OP_EXE_MODEL
-    ModelIntent.CALL_TOOL: 0x19,      # OP_EXE_TOOL
-    ModelIntent.READ_MEMORY: 0x10,    # OP_MEM_READ
-    ModelIntent.WRITE_MEMORY: 0x11,   # OP_MEM_WRITE
-    ModelIntent.DELETE_MEMORY: 0x12,  # OP_MEM_DELETE
-    ModelIntent.INDEX_QUERY: 0x13,    # OP_IDX_QUERY
-    ModelIntent.INDEX_UPSERT: 0x14,   # OP_IDX_UPSERT
-    ModelIntent.ROUTE: 0x16,          # OP_RTE_ROUTE
-    ModelIntent.FILTER: 0x15,         # OP_RTE_DISCOVER
-    ModelIntent.RETURN_RESULT: 0x02,  # OP_RESPONSE
-    ModelIntent.STREAM_RESULT: 0x04,  # OP_GEN (streaming)
-    ModelIntent.CANCEL: 0x1F,         # OP_SYS_CANCEL
+    ModelIntent.CLASSIFY: 0x43,       # OP_CLASSIFY
+    ModelIntent.GENERATE: 0x46,       # OP_EXECUTE (matches Rust's generate())
+    ModelIntent.REASON: 0x44,         # OP_REASON
+    ModelIntent.EMBED: 0x42,          # OP_EMBED
+    ModelIntent.RANK: 0x46,           # OP_EXECUTE (matches Rust's rank())
+    ModelIntent.SUMMARIZE: 0x46,      # OP_EXECUTE (matches Rust's summarize())
+    ModelIntent.SYNTHESIZE: 0x46,     # OP_EXECUTE (no dedicated Rust opcode)
+    ModelIntent.VERIFY: 0x44,         # OP_REASON (matches Rust's verify())
+    ModelIntent.EXTRACT: 0x46,        # OP_EXECUTE (matches Rust's extract())
+    ModelIntent.TRANSFORM: 0x46,      # OP_EXECUTE (matches Rust's transform())
+    ModelIntent.PLAN: 0x46,           # OP_EXECUTE (matches Rust's plan())
+    ModelIntent.EVALUATE: 0x46,       # OP_EXECUTE (matches Rust's evaluate())
+    ModelIntent.CALL_MODEL: 0x40,     # OP_MODEL_CALL
+    ModelIntent.CALL_TOOL: 0x41,      # OP_TOOL_CALL
+    ModelIntent.READ_MEMORY: 0x20,    # OP_MEMORY_READ
+    ModelIntent.WRITE_MEMORY: 0x21,   # OP_MEMORY_WRITE
+    ModelIntent.DELETE_MEMORY: 0x22,  # OP_MEMORY_DELETE
+    ModelIntent.INDEX_QUERY: 0x23,    # OP_INDEX_QUERY
+    ModelIntent.INDEX_UPSERT: 0x24,   # OP_INDEX_UPSERT
+    ModelIntent.ROUTE: 0x03,          # OP_DISCOVER (closest match; Rust has no dedicated routing opcode)
+    ModelIntent.FILTER: 0x46,         # OP_EXECUTE (no dedicated Rust opcode)
+    ModelIntent.RETURN_RESULT: 0x11,  # OP_RETURN (matches Rust's return_response())
+    ModelIntent.STREAM_RESULT: 0x12,  # OP_STREAM
+    ModelIntent.CANCEL: 0x09,         # OP_CANCEL
 }
 
 # Reverse mapping

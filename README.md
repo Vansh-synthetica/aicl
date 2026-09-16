@@ -102,21 +102,30 @@ instead of using `127.0.0.1`, and reconstructing a fresh HTTP client per
 call instead of reusing one) that turned out to cost every path in this
 benchmark ~40% of its total time, unrelated to AICL vs. HTTPS at all.
 
-## Wire format status — read before assuming cross-language compatibility
+## Wire format status — Python and Rust now speak the same protocol
 
-**`aicl.bin` (Python) and `core-rust` currently implement two different wire
-formats**, not the same protocol in two languages. They share the magic
-bytes (`b"AICL"`) and not much else: different header sizes (Python's is
-64 bytes; the spec and Rust use 56), different opcode taxonomies, different
-operand/symbol type tag sets. See [`WIRE_FORMAT_AUDIT.md`](WIRE_FORMAT_AUDIT.md)
-for the full field-by-field comparison against
-[`protocol/AICL-ISA.md`](protocol/AICL-ISA.md), the normative spec.
+**`aicl.bin` (Python) and `core-rust` implement the same wire format**,
+matching the ISA spec's own layout: a 56-byte header (magic, version,
+flags, message_id, correlation_id, deadline_ms, payload_length, a
+header-integrity CRC32), the same opcode taxonomy, the same operand type
+tags, and the same `opcode + varint(operand_count) + operands` payload
+structure. This isn't a claim taken on faith — `core-rust/examples/
+decode_python_packet.rs` and `core-rust/examples/encode_for_python.rs`
+are real, runnable proof: a packet encoded by Python decodes correctly in
+Rust, and vice versa, byte for byte, including nested `List` operands.
 
-Practically: a Python module using `aicl.bin` and a Rust module using
-`core-rust` cannot decode each other's packets today. `aicl.bin` is being
-brought in line with the ISA spec (and Rust); until that lands, treat
-`aicl.bin` as Python-to-Python only, and `core-rust` as the spec-compliant
-implementation to build cross-language interop against.
+Python's rich object model (`origin`, `qos`, `trace`, `error_info`,
+`metadata`, and everything else `Packet` exposes beyond the core
+opcode+operands) has no equivalent in `core-rust`'s wire format — rather
+than drop any of it, each field rides on the wire as an `Operand::Vendor`
+extension (tags `0x80`-`0xFF`, part of the ISA spec's own extensibility
+story). A Rust decoder sees a normal operand list where a few entries
+carry an opaque vendor payload it can skip; Python recognizes its own
+extension tags and reconstructs the rich fields. See
+`aicl/bin/extension_tags.py` for the tag assignments and
+[`WIRE_FORMAT_AUDIT.md`](WIRE_FORMAT_AUDIT.md) for the full history of
+how the two implementations drifted before this rewrite (kept as a
+historical record — the audit predates this fix).
 
 ## Testing
 

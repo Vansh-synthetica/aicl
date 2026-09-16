@@ -55,8 +55,8 @@ class Identity:
         )
 
     @classmethod
-    def from_bytes(cls, data: memoryview) -> "Identity":
-        """Decode identity from binary."""
+    def from_bytes(cls, data) -> "Identity":
+        """Decode identity from binary. Accepts bytes or a memoryview."""
         import struct
         if len(data) < 2:
             raise ValueError("Identity too short")
@@ -64,19 +64,35 @@ class Identity:
         name_len = data[1]
         if len(data) < 2 + name_len + 4:
             raise ValueError("Identity truncated")
-        name = data[2 : 2 + name_len].tobytes().decode("utf-8")
+        name = bytes(data[2 : 2 + name_len]).decode("utf-8")
         instance_id = struct.unpack_from(">I", data, 2 + name_len)[0]
         return cls(id_type=id_type, name=name, instance_id=instance_id)
 
 
 @dataclass(slots=True)
 class Symbol:
-    """A typed payload element.
+    """A typed operand — the wire's actual unit of data, matching
+    core-rust's `Operand` enum.
 
-    tag   : one of S_STRING, S_NUMBER, S_INTEGER, S_BOOLEAN, S_TAG,
-            S_KEY, S_VECTOR, S_REFERENCE, S_JSON, S_DATETIME,
-            S_UUID, S_NULL, S_BLOB
-    value : the raw value (type depends on tag)
+    tag   : one of the S_* tags in symbol_types.py (S_I8..S_DURATION_MS,
+            or a vendor tag >= 0x80 — see symbol_types.S_VENDOR_BASE)
+    value : the raw value (type depends on tag) —
+            S_I8/I16/I32/I64/U8/U16/U32/U64: int
+            S_F32/F64: float
+            S_BOOL: bool
+            S_STRING: str
+            S_BYTES: bytes
+            S_UUID: 16 raw bytes
+            S_HANDLE: int (u64)
+            S_REF: int (u16)
+            S_BUF_REF: (id: int, offset: int, length: int)
+            S_LIST: list[Symbol]
+            S_MAP: dict[str, Symbol]
+            S_NULL: None
+            S_TS_MS: int (i64)
+            S_DURATION_MS: int (u32)
+            vendor tag (>= 0x80): raw bytes (this codebase's extension
+              mechanism — see operands.py)
     """
 
     tag: int

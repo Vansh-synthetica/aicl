@@ -32,7 +32,7 @@ def main() -> None:
         # cmd == GO_SENTINEL: stream 50 chunks as fast as possible.
         for i in range(N_CHUNKS):
             pkt = Packet(
-                operation=4,  # OP_GEN
+                operation=0x46,  # OP_EXECUTE
                 symbols=[Symbol(S_STRING, CHUNK_TEXT)],
                 chunk_info=ChunkInfo(
                     total_chunks=N_CHUNKS, chunk_index=i,

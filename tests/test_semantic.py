@@ -10,7 +10,7 @@ from aicl.semantic.types import (
 from aicl.semantic.adapter import SemanticAdapter, GateCheck, GateResult
 from aicl.semantic.grammar import AICLGrammar
 from aicl.bin.constants import HEADER_SIZE
-from aicl.bin.ops import OP_CLS, OP_GEN, OP_EXE_TOOL, OP_MEM_READ
+from aicl.bin.ops import OP_CLASSIFY, OP_EXECUTE, OP_TOOL_CALL, OP_MEMORY_READ
 
 
 # ──────────────────────────────────────────────────────────────
@@ -339,7 +339,9 @@ def test_reverse_opcode_mapping():
 
 
 def test_classifier_opcodes():
-    assert INTENT_TO_OPCODE[ModelIntent.CLASSIFY] == OP_CLS
-    assert INTENT_TO_OPCODE[ModelIntent.GENERATE] == OP_GEN
-    assert INTENT_TO_OPCODE[ModelIntent.CALL_TOOL] == OP_EXE_TOOL
-    assert INTENT_TO_OPCODE[ModelIntent.READ_MEMORY] == OP_MEM_READ
+    assert INTENT_TO_OPCODE[ModelIntent.CLASSIFY] == OP_CLASSIFY
+    # GENERATE maps to the general-purpose Execute opcode, matching
+    # core-rust's own generate() constructor — see semantic/types.py.
+    assert INTENT_TO_OPCODE[ModelIntent.GENERATE] == OP_EXECUTE
+    assert INTENT_TO_OPCODE[ModelIntent.CALL_TOOL] == OP_TOOL_CALL
+    assert INTENT_TO_OPCODE[ModelIntent.READ_MEMORY] == OP_MEMORY_READ

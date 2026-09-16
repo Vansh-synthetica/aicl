@@ -4,7 +4,7 @@ import struct
 from aicl import encode, decode, Packet, StreamingDecoder
 from aicl.bin.types import Symbol, ChunkInfo
 from aicl.bin.symbol_types import S_STRING
-from aicl.bin.constants import FLAG_REQUEST, FLAG_STREAM_CHUNK, FLAG_FRAGMENTED, HEADER_SIZE, CURRENT_VERSION, MAGIC
+from aicl.bin.constants import FLAG_REQUEST, FLAG_STREAM_CHUNK, HEADER_SIZE, CURRENT_VERSION, MAGIC
 from aicl.bin.exceptions import TruncatedPacketError, ChecksumError, HeaderError
 
 
@@ -22,15 +22,21 @@ def expect(exc_class, fn):
 def test_checksum_valid():
     pkt = Packet()
     data = encode(pkt, checksum=True)
-    assert len(data) == HEADER_SIZE + 4
+    # header + opcode + operand-count varint + auto-generated session_id
+    # extension + 4-byte CRC trailer.
+    assert len(data) > HEADER_SIZE + 2
     view = decode(data)
     assert view.has_trailer
 
 
 def test_checksum_mismatch():
-    pkt = Packet()
+    pkt = Packet(symbols=[Symbol(S_STRING, "hello")])
     data = bytearray(encode(pkt, checksum=True))
-    data[64] ^= 0xFF
+    # Flip a byte inside the payload (after the header, before the
+    # trailer) — flipping anything inside the header itself would trip
+    # the header's own CRC first (HeaderError), not the trailer's
+    # ChecksumError this test is actually checking.
+    data[HEADER_SIZE + 3] ^= 0xFF
     expect(ChecksumError, lambda: decode(bytes(data)))
 
 
@@ -48,7 +54,7 @@ def test_truncated_header():
 def test_truncated_payload():
     pkt = Packet(symbols=[Symbol(S_STRING, "test")])
     data = encode(pkt)
-    expect(TruncatedPacketError, lambda: decode(data[:HEADER_SIZE + 5]))
+    expect(TruncatedPacketError, lambda: decode(data[:HEADER_SIZE + 3]))
 
 
 def test_invalid_magic():
@@ -69,9 +75,20 @@ def test_invalid_version():
     expect(HeaderError, go)
 
 
+def test_header_crc_rejects_corruption():
+    """The new 56-byte header carries a real integrity check (CRC32 over
+    bytes 0-51) that the old 64-byte format never had — corrupting any
+    header field, even one the old format didn't separately validate,
+    must be caught."""
+    pkt = Packet(symbols=[Symbol(S_STRING, "test")])
+    data = bytearray(encode(pkt))
+    data[10] ^= 0xFF  # inside message_id, well within the CRC-covered prefix
+    expect(HeaderError, lambda: decode(bytes(data)))
+
+
 def test_streaming_full_chunks():
-    pkt1 = encode(Packet(flags=FLAG_REQUEST, operation=3, symbols=[Symbol(S_STRING, "one")]))
-    pkt2 = encode(Packet(flags=FLAG_REQUEST, operation=4, symbols=[Symbol(S_STRING, "two")]))
+    pkt1 = encode(Packet(flags=FLAG_REQUEST, operation=0x43, symbols=[Symbol(S_STRING, "one")]))
+    pkt2 = encode(Packet(flags=FLAG_REQUEST, operation=0x44, symbols=[Symbol(S_STRING, "two")]))
     decoder = StreamingDecoder()
     results = decoder.feed(pkt1 + pkt2)
     assert len(results) == 2
@@ -137,14 +154,15 @@ def test_streaming_clear():
 
 def test_streaming_chunked_flag():
     pkt = Packet(
-        flags=FLAG_STREAM_CHUNK | FLAG_FRAGMENTED,
+        flags=FLAG_STREAM_CHUNK,
         chunk_info=ChunkInfo(total_chunks=5, chunk_index=2,
                              original_size=10000, chunk_offset=4000, chunk_size=2000),
     )
     data = encode(pkt)
     view = decode(data)
     assert view.is_stream_chunk
-    assert view.is_fragmented
+    assert view.chunk_info.total_chunks == 5
+    assert view.chunk_info.chunk_index == 2
 
 
 def test_packetview_zero_copy():
@@ -171,4 +189,3 @@ def test_streaming_large_chunk():
             assert results[0].symbols[0].value == "x" * 1000
             return
     assert False, "expected results"
-

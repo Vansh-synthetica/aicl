@@ -2,9 +2,8 @@
 from __future__ import annotations
 from typing import List
 import aicl.bin.constants as C
-import aicl.bin.tlv as T
-import aicl.bin.symbols as S
-from aicl.bin.symbol_types import SYMBOL_TYPE_NAMES
+import aicl.bin.extension_tags as X
+from aicl.bin.symbol_types import SYMBOL_TYPE_NAMES, S_LIST, is_vendor
 from aicl.bin.codec_view import PacketView
 
 
@@ -13,18 +12,18 @@ def format_view(view: PacketView, indent: int = 0) -> str:
     lines: List[str] = []
     lines.append(f"{pad}── AICL-BIN Packet ──")
     lines.append(f"{pad}magic:     {view.raw[:4].tobytes()}")
-    lines.append(f"{pad}version:   {view.version}")
+    lines.append(f"{pad}version:   0x{view.version:04x}")
     lines.append(f"{pad}flags:     0x{view.flags:04x}  {_flag_names(view.flags)}")
-    lines.append(f"{pad}session:   {view.session_id.hex()}")
+    if view.session_id: lines.append(f"{pad}session:   {view.session_id.hex()}")
     lines.append(f"{pad}message:   {view.message_id.hex()}")
     lines.append(f"{pad}correlation: {view.correlation_id.hex()}")
+    lines.append(f"{pad}deadline:  {view.deadline_ms}ms")
     lines.append(f"{pad}payload:   {view.payload_length} bytes")
     if view.origin: lines.append(f"{pad}origin:    {view.origin}")
     if view.targets: lines.append(f"{pad}targets:   {', '.join(view.targets)}")
-    if view.operation:
-        from aicl.bin.ops import OPERATION_NAMES
-        op_name = OPERATION_NAMES.get(view.operation, f"0x{view.operation:02x}")
-        lines.append(f"{pad}operation: [{view.operation}] {op_name}")
+    from aicl.bin.ops import OPERATION_NAMES
+    op_name = OPERATION_NAMES.get(view.operation, f"0x{view.operation:02x}")
+    lines.append(f"{pad}operation: [0x{view.operation:02x}] {op_name}")
     if view.intent: lines.append(f"{pad}intent:    {view.intent}")
     if view.symbols:
         lines.append(f"{pad}symbols:")
@@ -34,7 +33,6 @@ def format_view(view: PacketView, indent: int = 0) -> str:
         for sym in view.response_symbols: lines.append(f"{pad}  {format_symbol(sym)}")
     if view.confidence != 1.0: lines.append(f"{pad}confidence: {view.confidence:.4f}")
     if view.priority != 128: lines.append(f"{pad}priority:  {view.priority}")
-    if view.deadline_ms: lines.append(f"{pad}deadline:  {view.deadline_ms}")
     if view.capabilities: lines.append(f"{pad}capabilities: {', '.join(view.capabilities)}")
     if view.qos:
         q = view.qos
@@ -55,30 +53,25 @@ def format_view(view: PacketView, indent: int = 0) -> str:
     return "\n".join(lines)
 
 def format_symbol(sym) -> str:
-    tag_name = SYMBOL_TYPE_NAMES.get(sym.tag, f"0x{sym.tag:02x}")
+    tag_name = SYMBOL_TYPE_NAMES.get(sym.tag, f"vendor:0x{sym.tag:02x}" if is_vendor(sym.tag) else f"0x{sym.tag:02x}")
     v = sym.value
-    if sym.tag == 0x01: return f"{tag_name}:\"{v}\""
-    if sym.tag == 0x04: return f"{tag_name}:{v}"
-    if sym.tag == 0x02: return f"{tag_name}:{v}"
-    if sym.tag == 0x03: return f"{tag_name}:{v}"
-    if sym.tag == 0x0C: return f"{tag_name}"
-    if sym.tag == 0x07:
+    if sym.tag == S_LIST:
         inner = ", ".join(format_symbol(s) for s in (v or []))
-        return f"VECTOR[{inner}]"
+        return f"{tag_name}[{inner}]"
+    if isinstance(v, str):
+        return f"{tag_name}:\"{v}\""
+    if v is None:
+        return f"{tag_name}"
     return f"{tag_name}:{v!r}"
 
 
-def format_tlv(tlv_type: int, value: bytes) -> str:
-    type_names = {
-        0x01: "ORIGIN", 0x02: "TARGETS", 0x03: "OPERATION", 0x04: "INTENT",
-        0x05: "SYMBOLS", 0x06: "RESPONSE_SYMBOLS", 0x07: "METADATA", 0x08: "CONFIDENCE",
-        0x09: "PRIORITY", 0x0A: "DEADLINE", 0x0B: "CAPABILITIES", 0x0C: "QOS",
-        0x0D: "SECURITY", 0x0E: "TRACE", 0x0F: "CHUNK_INFO", 0x10: "BLOB_REF",
-        0x11: "BACKPRESSURE", 0x12: "ERROR_INFO", 0x13: "ACK_INFO",
-        0x14: "TARGET_CAPS", 0x15: "SCHEMA_ID", 0x16: "STREAM_ID",
-        0x17: "PARTIAL_RESULT", 0x18: "MODEL_INVOCATION", 0x19: "TOOL_INVOCATION",
-    }
-    name = type_names.get(tlv_type, f"TYPE_0x{tlv_type:02x}")
+def format_tlv(ext_tag: int, value: bytes) -> str:
+    """Format a raw vendor-extension operand (see extension_tags.py) —
+    named `format_tlv` for source compatibility with callers written
+    before the payload-structure rewrite; these are operand-level vendor
+    tags now, not TLV type codes."""
+    names = {v: k[4:] for k, v in vars(X).items() if k.startswith("EXT_")}
+    name = names.get(ext_tag, f"VENDOR_0x{ext_tag:02x}")
     if len(value) <= 16:
         try: return f"{name}: {value.decode()!r}"
         except UnicodeDecodeError: pass
@@ -94,17 +87,18 @@ def _flag_names(flags: int) -> str:
     parts = []
     if flags & C.FLAG_REQUEST: parts.append("REQUEST")
     if flags & C.FLAG_RESPONSE: parts.append("RESPONSE")
-    if flags & C.FLAG_EVENT: parts.append("EVENT")
-    if flags & C.FLAG_ERROR: parts.append("ERROR")
-    if flags & C.FLAG_HEARTBEAT: parts.append("HEARTBEAT")
-    if flags & C.FLAG_CANCEL: parts.append("CANCEL")
-    if flags & C.FLAG_ACK: parts.append("ACK")
     if flags & C.FLAG_STREAM_CHUNK: parts.append("STREAM_CHUNK")
-    if flags & C.FLAG_HAS_TRAILER: parts.append("HAS_TRAILER")
+    if flags & C.FLAG_STREAM_END: parts.append("STREAM_END")
+    if flags & C.FLAG_ERROR: parts.append("ERROR")
+    if flags & C.FLAG_CANCEL: parts.append("CANCEL")
+    if flags & C.FLAG_HEARTBEAT: parts.append("HEARTBEAT")
     if flags & C.FLAG_COMPRESSED: parts.append("COMPRESSED")
     if flags & C.FLAG_ENCRYPTED: parts.append("ENCRYPTED")
-    if flags & C.FLAG_FRAGMENTED: parts.append("FRAGMENTED")
-    if flags & C.FLAG_BACKPRESSURE: parts.append("BACKPRESSURE")
-    if flags & C.FLAG_HAS_EXTENSIONS: parts.append("HAS_EXTENSIONS")
-    if flags & C.FLAG_EOS: parts.append("EOS")
+    if flags & C.FLAG_TRACED: parts.append("TRACED")
+    if flags & C.FLAG_PRIORITY_HIGH: parts.append("PRIORITY_HIGH")
+    if flags & C.FLAG_PRIORITY_LOW: parts.append("PRIORITY_LOW")
+    if flags & C.FLAG_EXTENDED: parts.append("EXTENDED")
+    if flags & C.FLAG_HAS_BUFFER_REF: parts.append("HAS_BUFFER_REF")
+    if flags & C.FLAG_FROZEN: parts.append("FROZEN")
+    if flags & C.FLAG_HAS_TRAILER: parts.append("HAS_TRAILER")
     return "|".join(parts) if parts else "none"

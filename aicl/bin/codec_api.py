@@ -16,18 +16,17 @@ def encode(packet: Packet, checksum: bool = False) -> bytes:
 
     If checksum=True, appends a 4-byte CRC32 trailer (FLAG_HAS_TRAILER set).
     """
-    payload = packet.build_tlvs()
+    payload = packet.build_payload()
     flags = packet.flags
     if checksum:
         flags |= C.FLAG_HAS_TRAILER
     header = pack_header(
         version=packet.version,
         flags=flags,
-        session_id=bytes(packet.session_id),
         message_id=bytes(packet.message_id),
         correlation_id=bytes(packet.correlation_id),
+        deadline_ms=packet.deadline_ms,
         payload_length=len(payload),
-        target_count=len(packet.targets),
     )
     result = header + payload
     if checksum:
@@ -52,9 +51,9 @@ def decode(data) -> PacketView:
             f"Buffer too short for header: {len(raw)} < {C.HEADER_SIZE}"
         )
     validate_header(raw[:C.HEADER_SIZE])
-    validate_flags(struct.unpack_from(">H", raw, 4)[0])
+    validate_flags(struct.unpack_from(">H", raw, 6)[0])
 
-    payload_length = struct.unpack_from(">I", raw, 56)[0]
+    payload_length = struct.unpack_from(">I", raw, 44)[0]
     hdr_end = C.HEADER_SIZE
     payload_end = hdr_end + payload_length
 

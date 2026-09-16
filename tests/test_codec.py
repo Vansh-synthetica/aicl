@@ -5,8 +5,8 @@ import uuid
 from aicl import encode, decode, Packet
 from aicl.bin.types import Identity, Symbol, QoS, ErrorInfo, Backpressure
 from aicl.bin.symbol_types import (
-    S_STRING, S_NUMBER, S_INTEGER, S_BOOLEAN, S_TAG,
-    S_VECTOR, S_REFERENCE, S_JSON, S_UUID, S_NULL, S_BLOB,
+    S_STRING, S_F64, S_I64, S_BOOL,
+    S_LIST, S_UUID, S_NULL, S_BYTES,
 )
 from aicl.bin.constants import (
     FLAG_REQUEST, FLAG_RESPONSE, FLAG_ERROR, HEADER_SIZE, CURRENT_VERSION,
@@ -16,9 +16,13 @@ from aicl.bin.constants import (
 def test_roundtrip_minimal():
     pkt = Packet()
     data = encode(pkt)
-    assert len(data) == HEADER_SIZE
+    # header + opcode + operand-count varint + an auto-generated session_id
+    # extension (Packet always assigns one in __post_init__, so even a
+    # "default" packet's payload is never just the bare 2-byte minimum).
+    assert len(data) > HEADER_SIZE
     view = decode(data)
     assert view.version == CURRENT_VERSION
+    assert view.session_id == pkt.session_id
 
 
 def test_roundtrip_full():
@@ -29,51 +33,52 @@ def test_roundtrip_full():
         correlation_id=uuid.uuid4().bytes,
         origin=Identity(0x01, "orchestrator"),
         targets=["sentiment_classifier", "intent_parser"],
-        operation=3,
+        operation=0x43,  # OP_CLASSIFY
         intent="Classify sentiment of user text",
         symbols=[
             Symbol(S_STRING, "I love this product!"),
-            Symbol(S_NUMBER, 0.95),
-            Symbol(S_INTEGER, 42),
-            Symbol(S_BOOLEAN, True),
-            Symbol(S_TAG, "positive"),
+            Symbol(S_F64, 0.95),
+            Symbol(S_I64, 42),
+            Symbol(S_BOOL, True),
+            Symbol(S_STRING, "positive"),
         ],
         confidence=0.95, priority=64,
-        deadline_ms=1234567890000,
+        deadline_ms=123456789,
         capabilities=["sentiment", "multilingual"],
         schema_id="sentiment-v1",
     )
     data = encode(pkt)
     assert len(data) > HEADER_SIZE
     view = decode(data)
-    assert view.operation == 3
+    assert view.operation == 0x43
     assert view.targets == ["sentiment_classifier", "intent_parser"]
     assert view.confidence == 0.95
     assert view.origin.name == "orchestrator"
+    assert view.deadline_ms == 123456789
     assert len(view.symbols) == 5
     assert view.symbols[0].value == "I love this product!"
     assert view.symbols[3].value is True
     assert view.symbols[4].value == "positive"
 
 
-def test_roundtrip_vectors():
+def test_roundtrip_lists():
     pkt = Packet(
         flags=FLAG_REQUEST,
-        symbols=[Symbol(S_VECTOR, [
-            Symbol(S_VECTOR, [Symbol(S_STRING, "a"), Symbol(S_STRING, "b")]),
+        symbols=[Symbol(S_LIST, [
+            Symbol(S_LIST, [Symbol(S_STRING, "a"), Symbol(S_STRING, "b")]),
             Symbol(S_STRING, "c"),
         ])]
     )
     data = encode(pkt)
     view = decode(data)
     outer = view.symbols[0]
-    assert outer.tag == S_VECTOR
+    assert outer.tag == S_LIST
     assert outer.value[0].value[0].value == "a"
 
 
-def test_roundtrip_blob():
+def test_roundtrip_bytes():
     blob_data = bytes(range(256))
-    pkt = Packet(symbols=[Symbol(S_BLOB, blob_data)])
+    pkt = Packet(symbols=[Symbol(S_BYTES, blob_data)])
     data = encode(pkt)
     view = decode(data)
     assert view.symbols[0].value == blob_data
@@ -95,15 +100,18 @@ def test_roundtrip_null():
     assert view.symbols[0].value is None
 
 
-def test_roundtrip_reference():
-    pkt = Packet(symbols=[Symbol(S_REFERENCE, "nlp.sentiment.output.label")])
+def test_roundtrip_string_as_reference():
+    # core-rust has no dedicated "reference" operand tag distinct from a
+    # plain string — see symbol_types.py's note on the old S_REFERENCE tag.
+    pkt = Packet(symbols=[Symbol(S_STRING, "nlp.sentiment.output.label")])
     data = encode(pkt)
     view = decode(data)
     assert view.symbols[0].value == "nlp.sentiment.output.label"
 
 
-def test_roundtrip_json():
-    pkt = Packet(symbols=[Symbol(S_JSON, '{"key": "value"}')])
+def test_roundtrip_string_as_json():
+    # Same for the old S_JSON tag — JSON text is just a string on the wire.
+    pkt = Packet(symbols=[Symbol(S_STRING, '{"key": "value"}')])
     data = encode(pkt)
     view = decode(data)
     assert view.symbols[0].value == '{"key": "value"}'
@@ -113,7 +121,7 @@ def test_response_packet():
     pkt = Packet(
         flags=FLAG_RESPONSE,
         correlation_id=uuid.uuid4().bytes,
-        response_symbols=[Symbol(S_TAG, "positive"), Symbol(S_NUMBER, 0.95)],
+        response_symbols=[Symbol(S_STRING, "positive"), Symbol(S_F64, 0.95)],
     )
     data = encode(pkt)
     view = decode(data)

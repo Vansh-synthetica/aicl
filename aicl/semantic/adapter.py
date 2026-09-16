@@ -20,10 +20,7 @@ from aicl.bin.codec_api import decode as bin_decode
 from aicl.bin.codec_packet import Packet as BinPacket
 from aicl.bin.codec_view import PacketView
 from aicl.bin.types import Identity, Symbol, ErrorInfo, ToolInvocation, ModelInvocation
-from aicl.bin.symbol_types import (
-    S_STRING, S_NUMBER, S_INTEGER, S_BOOLEAN, S_TAG,
-    S_KEY, S_VECTOR, S_REFERENCE, S_JSON, S_NULL,
-)
+from aicl.bin.symbol_types import S_STRING, S_F64, S_I64, S_BOOL, S_LIST, S_NULL
 from aicl.semantic.types import (
     ModelIntent,
     ModelAction,
@@ -109,19 +106,26 @@ class _AllowAllGate(GateCheck):
 # ──────────────────────────────────────────────────────────────
 
 def _to_binary_symbol(value: Any, type_prefix: str = "") -> Symbol:
-    """Convert a Python value to a binary Symbol."""
+    """Convert a Python value to a binary Symbol.
+
+    Dicts encode as JSON text under S_STRING — core-rust's operand set has
+    no dedicated JSON tag (the old S_JSON tag was always just a UTF-8
+    string on the wire anyway; "this string is JSON" was purely an
+    application-level convention, not a real wire distinction), so this
+    matches what Rust would do with the same data.
+    """
     if isinstance(value, str):
         return Symbol(tag=S_STRING, value=value)
     elif isinstance(value, bool):
-        return Symbol(tag=S_BOOLEAN, value=value)
+        return Symbol(tag=S_BOOL, value=value)
     elif isinstance(value, int):
-        return Symbol(tag=S_INTEGER, value=value)
+        return Symbol(tag=S_I64, value=value)
     elif isinstance(value, float):
-        return Symbol(tag=S_NUMBER, value=value)
+        return Symbol(tag=S_F64, value=value)
     elif isinstance(value, (list, tuple)):
-        return Symbol(tag=S_VECTOR, value=list(value))
+        return Symbol(tag=S_LIST, value=[_to_binary_symbol(v) for v in value])
     elif isinstance(value, dict):
-        return Symbol(tag=S_JSON, value=json.dumps(value, separators=(",", ":")))
+        return Symbol(tag=S_STRING, value=json.dumps(value, separators=(",", ":")))
     elif value is None:
         return Symbol(tag=S_NULL, value=None)
     else:

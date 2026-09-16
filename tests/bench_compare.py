@@ -21,7 +21,7 @@ from aicl.bin.codec_api import encode, decode
 from aicl.bin.codec_packet import Packet
 from aicl.bin.types import Symbol
 from aicl.bin.symbol_types import S_STRING
-from aicl.bin.ops import OP_CLS, OP_GEN
+from aicl.bin.ops import OP_CLASSIFY, OP_EXECUTE
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -30,7 +30,7 @@ from aicl.bin.ops import OP_CLS, OP_GEN
 
 def pkt_classify_simple():
     return Packet(
-        operation=OP_CLS,
+        operation=OP_CLASSIFY,
         symbols=[
             Symbol(S_STRING, "The quick brown fox jumps"),
             Symbol(S_STRING, "positive"),
@@ -41,7 +41,7 @@ def pkt_classify_simple():
 
 def pkt_classify_full():
     return Packet(
-        operation=OP_CLS,
+        operation=OP_CLASSIFY,
         symbols=[
             Symbol(S_STRING, "The quick brown fox jumps over the lazy dog"),
         ],
@@ -51,7 +51,7 @@ def pkt_classify_full():
 
 def pkt_generate():
     return Packet(
-        operation=OP_GEN,
+        operation=OP_EXECUTE,
         symbols=[
             Symbol(S_STRING, "Explain quantum computing in three steps"),
         ],

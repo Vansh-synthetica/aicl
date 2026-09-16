@@ -1,5 +1,27 @@
 ﻿# Wire-Format Audit
 
+> **RESOLVED.** This audit's core finding — that `aicl/bin/` (Python) and
+> `core-rust` implemented genuinely different, incompatible wire formats —
+> has been fixed. `aicl/bin/` was rewritten to match `core-rust`'s ISA-spec
+> layout exactly (56-byte header, same opcode taxonomy, same operand type
+> tags, same `opcode + varint + operands` payload structure), with a
+> vendor-extension mechanism (`Operand::Vendor`, tags `0x80`-`0xFF`)
+> carrying Python's rich object-model fields that have no core-rust
+> equivalent. Verified with real, bidirectional, byte-for-byte round trips
+> — see `core-rust/examples/decode_python_packet.rs` and
+> `core-rust/examples/encode_for_python.rs`, and README.md's "Wire format
+> status" section. This document is kept as-is below as the historical
+> record of what was wrong and how badly the two implementations had
+> drifted — it does **not** describe the current state.
+>
+> One correction to this document's own findings, caught during the fix:
+> §4.8's table claims core-rust's header CRC covers only the first 28
+> bytes, diverging from the spec's implied 52-byte scope. Direct
+> inspection of `core-rust/src/codec.rs` (`crc32(&data[..52])`, both
+> encode and decode) shows it actually covers 52 bytes, matching the spec
+> — the "28B" claim below was incorrect (or accurate against an older
+> version of the code) at the time it was written.
+
 **Scope:** Compare the three wire formats that currently coexist in the AICL repository, and verify the Rust implementation against the normative spec.
 
 **Sources audited:**

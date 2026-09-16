@@ -5,7 +5,7 @@ import uuid
 import tracemalloc
 from aicl import encode, decode, Packet, StreamingDecoder
 from aicl.bin.types import Identity, Symbol, QoS
-from aicl.bin.symbol_types import S_STRING, S_NUMBER, S_INTEGER, S_BOOLEAN, S_TAG
+from aicl.bin.symbol_types import S_STRING, S_F64, S_I64, S_BOOL
 
 __all__ = []
 
@@ -49,10 +49,10 @@ def bm_medium(n=20_000):
         targets=["sentiment", "intent", "ner"],
         symbols=[
             Symbol(S_STRING, "What is the weather in San Francisco?"),
-            Symbol(S_NUMBER, 0.95),
-            Symbol(S_INTEGER, 42),
-            Symbol(S_BOOLEAN, True),
-            Symbol(S_TAG, "weather_query"),
+            Symbol(S_F64, 0.95),
+            Symbol(S_I64, 42),
+            Symbol(S_BOOL, True),
+            Symbol(S_STRING, "weather_query"),
         ],
         confidence=0.9,
         priority=64,

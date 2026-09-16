@@ -48,7 +48,7 @@ from aicl.bin.codec_api import encode as bin_encode, decode as bin_decode
 from aicl.bin.codec_packet import Packet as BinPacket
 from aicl.bin.codec_view import PacketView as BinPacketView
 from aicl.bin.types import Identity, Symbol
-from aicl.bin.symbol_types import S_STRING, S_INTEGER, S_JSON, S_BOOLEAN
+from aicl.bin.symbol_types import S_STRING, S_I64, S_BOOL
 from aicl.bin.constants import HEADER_SIZE as BIN_HEADER_SIZE
 
 
