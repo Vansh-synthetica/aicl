@@ -2,3 +2,8 @@ fastapi>=0.110
 uvicorn>=0.29
 httpx>=0.27
 cryptography>=42
+# Only needed for e2e_aicl_inprocess_server.py (the fully-in-process, zero-
+# network condition). Needs a C++ toolchain to build from source on
+# Windows unless a prebuilt wheel is available for your platform — see
+# BENCHMARKS.md for the exact build command used.
+llama-cpp-python>=0.3

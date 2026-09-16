@@ -82,14 +82,18 @@ job:
 |---|---|---|---|
 | Request/response (cross-process, no inference) | 16.3µs avg | 1,063µs avg | ~65× faster |
 | Streaming, 51 chunks/response (cross-process, no inference) | 452µs/stream | 14,005µs/stream | ~31× faster |
-| **End-to-end with real model inference** (40 real tokens) | 952ms avg | 964ms avg | **~1% faster overall** |
+| End-to-end, real inference, AICL over HTTP (40 real tokens) | 952ms avg | 964ms avg | ~1% faster |
+| **End-to-end, real inference, AICL fully in-process (no network at all)** | **1,061.5ms avg (−62.6ms vs. no-relay)** | — | **further ~12ms faster than AICL-over-HTTP** |
 
 The pure-transport rows isolate transport cost from model compute — real,
-but they overstate what a user actually feels. The last row is the one
-that matters: with a real model generating real tokens, AICL adds no
-measurable overhead over calling the model directly, while HTTPS/SSE adds
-a genuine but tiny ~5-12ms — a small slice of the ~950ms a real generation
-takes once you strip out avoidable networking overhead (see below).
+but they overstate what a user actually feels. The middle row is what
+matters with the network still involved at all: AICL adds no measurable
+overhead over calling the model directly, while HTTPS/SSE adds a genuine
+but tiny ~5-78ms depending on the run. The **last row answers a different
+question — can the network be removed entirely** — by having the relay
+load the model directly (via `llama-cpp-python`, no HTTP/TCP/`localhost`
+anywhere) instead of calling a separate server. It measurably wins, on
+top of everything else.
 
 Full methodology, every caveat, and the debugging story behind that last
 number are in [BENCHMARKS.md](BENCHMARKS.md) — including two real,

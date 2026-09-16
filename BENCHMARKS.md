@@ -14,15 +14,21 @@ it are in this repo, and the commands to rerun them are included.
 | Request/response, **cross-process** (Python, 2 real OS processes) | 16.3µs avg | 1,063µs avg (persistent conn) | **~65× faster** |
 | Request/response, cross-process, fresh connection each time | 16.3µs avg | 17,093µs avg | **~1,050× faster** |
 | Streaming, 51 chunks/response, cross-process (no real inference) | 452µs/stream (8.9µs/chunk) | 14,005µs/stream (275µs/chunk) | **~31× faster** |
-| **End-to-end with real model inference** (40 real tokens, Qwen2.5-0.5B) | 952ms avg, **−6.3ms vs. no-relay** | 964ms avg, **+5.2ms vs. no-relay** | **~1% faster overall** |
+| End-to-end, real inference, **AICL over HTTP** (40 real tokens) | 952ms avg, −6.3ms vs. no-relay | 964ms avg, +5.2ms vs. no-relay | ~1% faster overall |
+| **End-to-end, real inference, AICL fully in-process (zero network)** | **1,061.5ms avg, −62.6ms vs. no-relay** | *(same HTTP relay as above)* | **further −11.9ms median vs. AICL-over-HTTP** |
 
 The pure-transport numbers (rows 1–4) isolate transport/codec cost from
 compute — that's the right way to measure a transport, but by itself it
-overstates what a user actually feels. The **last row is the one that
-matters for judging real impact**: with genuine model inference in the
-loop, AICL adds no measurable overhead over calling the model directly,
-while HTTPS/SSE adds ~78ms — real, but a small fraction of total time once
-the model itself is doing ~950ms of work. Read [Methodology](#methodology)
+overstates what a user actually feels. Row 5 is the one that matters for
+judging real impact with the network still in the picture at all: AICL
+adds no measurable overhead over calling the model directly, while
+HTTPS/SSE adds ~5-78ms depending on the run — real, but a small fraction
+of total time once the model itself is doing the work. **Row 6 answers a
+different question — can the network be removed entirely** — and the
+answer is yes: loading the model directly in the relay process (via
+`llama-cpp-python`, no HTTP/TCP/"localhost" anywhere) measurably beats
+even the optimized HTTP path. See [§6](#6-going-further-removing-the-network-hop-entirely)
+for the honest caveats on that number. Read [Methodology](#methodology)
 and [What this does and doesn't prove](#what-this-does-and-doesnt-prove)
 before citing any of this.
 
@@ -247,6 +253,77 @@ talks to a local HTTP server*, a lesson worth carrying into real code, not
 just this benchmark). Reporting the first number that came out at any of
 these stages would have been actively misleading.
 
+### 6. Going further: removing the network hop entirely
+
+Everything above still has `127.0.0.1` in it somewhere — the relay
+process still talks to `llama-server` over real (if now well-optimized)
+TCP loopback. That's not actually necessary. `llama-server` is just a thin
+HTTP wrapper around llama.cpp's C++ library; nothing requires going
+through a socket to reach it. `llama-cpp-python` binds that library
+directly, so a relay process can load the model itself and generate
+tokens with **no HTTP, no TCP, no "localhost" anywhere in the path** —
+only AICL's shared-memory ring between the relay and the client.
+
+```
+cd benchmarks/https_vs_binary
+pip install llama-cpp-python   # needs a C++ toolchain — see below
+python e2e_combined.py 40      # now runs all four conditions
+```
+
+A fourth condition was added to the same interleaved benchmark:
+**AICL in-process** — the relay loads the GGUF model directly via
+`llama_cpp.Llama(...)` at process startup (once, like `llama-server`
+loading its model once) and streams real generated tokens straight into
+the AICL ring, with literally no network stack anywhere in the loop.
+
+| Path | Avg | p50 | min | max |
+|---|---|---|---|---|
+| Baseline (direct HTTP, no relay) | 1,124.1ms | 1,121.3ms | 1,020.7ms | 1,245.4ms |
+| AICL relay (ring → HTTP → `llama-server`) | 1,107.9ms | 1,099.8ms | 1,005.9ms | 1,279.1ms |
+| SSE relay (HTTPS → HTTP → `llama-server`) | 1,109.4ms | 1,108.7ms | 994.6ms | 1,287.0ms |
+| **AICL relay (ring → in-process model, zero network)** | **1,061.5ms** | 1,083.4ms | 876.6ms | 1,218.1ms |
+
+| Comparison | Result |
+|---|---|
+| AICL in-process vs. AICL-over-HTTP | **−46.4ms mean, −11.9ms median** (paired, stdev 108.6ms) |
+| AICL in-process vs. no-relay baseline | **−62.6ms** |
+
+**Yes — removing the network hop entirely measurably helps**, on top of
+everything section 5 already fixed. The effect is real (consistent
+direction across 40 paired rounds) but noisier than the earlier fixes —
+the stdev (108.6ms) is larger than the mean difference, so treat the
+median (−11.9ms) as the more honest single number, with the mean
+reflecting that a few rounds saw a considerably larger gap. One caveat
+specific to *this* run: it has two full copies of the model resident in
+memory at once (`llama-server`'s and the in-process relay's), so absolute
+times here run ~100-150ms higher across all four conditions than section
+5's single-model numbers — a real cost of the experimental setup, not of
+either transport. The **relative** comparison (in-process vs. HTTP) is
+unaffected by that; the **absolute** numbers in this section aren't
+directly comparable to section 5's.
+
+**Why this isn't the default architecture in this repo**: it trades
+isolation for speed. `llama-server` as a separate process means it can
+crash, restart, or be swapped for a different backend without touching
+the code that talks to it; loading the model in-process means the relay
+and the model share a memory space and a lifetime. Whether that tradeoff
+is worth ~50ms depends entirely on what you're building — for a system
+that already commits to one persistent model-serving process per module
+(which is a reasonable design), this is close to free.
+
+**Building `llama-cpp-python` from source on Windows**, since no prebuilt
+wheel exists for most platforms: it needs a C++ toolchain (Visual Studio
+Build Tools with the "Desktop development with C++" workload, which
+bundles CMake) and, on this machine, ran into Windows' default 260-character
+path length limit while unpacking llama.cpp's vendored source tree —
+worked around by pointing `TEMP`/`TMP` at a short path (`C:\t`) for the
+build rather than enabling long-path support system-wide:
+
+```powershell
+$vcvars = "<VS Build Tools path>\VC\Auxiliary\Build\vcvars64.bat"
+cmd /c "call `"$vcvars`" && set TEMP=C:\t && set TMP=C:\t && python -m pip install llama-cpp-python"
+```
+
 ## Methodology
 
 - **Timer**: Rust benchmarks use `std::time::Instant` (Windows:
@@ -330,9 +407,11 @@ python streaming_aicl_client.py 200
 python -m uvicorn streaming_sse_server:app --host 127.0.0.1 --port 8443 --ssl-keyfile key.pem --ssl-certfile cert.pem --log-level warning
 python streaming_sse_client.py 200
 
-# End-to-end with real model inference (needs a small local GGUF model —
-# see e2e_combined.py for the exact llama-server command; start it on port
-# 8099, and e2e_sse_relay_server.py via uvicorn on port 8443, first)
+# End-to-end with real model inference, all four conditions including the
+# fully-in-process one (needs a small local GGUF model — see
+# e2e_combined.py for the exact llama-server command; start it on port
+# 8099, and e2e_sse_relay_server.py via uvicorn on port 8443, first; and
+# pip install llama-cpp-python — see the build note in §6 above)
 "../../.venv/Scripts/python.exe" e2e_combined.py 40
 
 # Same-process Rust
